@@ -3,7 +3,7 @@ import cookieSession from 'cookie-session';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { get, all, run, batch } from './lib/db.js';
+import { get, all, run, batch, isRemote } from './lib/db.js';
 import { renderPage } from './lib/pages.js';
 import * as google from './lib/google.js';
 import { computeSlots } from './lib/slots.js';
@@ -335,6 +335,23 @@ app.post('/auth/logout', wrap(async (req, res) => {
 }));
 
 // ---------- owner API ----------
+
+// Plain-language status check: open /api/health in a browser after deploying.
+app.get('/api/health', wrap(async (req, res) => {
+  const status = {
+    website: 'working',
+    database: isRemote ? 'Turso (permanent storage)' : 'TEMPORARY local file — set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN',
+    google: DEMO ? 'not connected yet (demo mode)' : 'Google sign-in configured',
+    address: BASE_URL,
+  };
+  try {
+    await get('SELECT 1 AS ok');
+    status.databaseConnection = 'OK';
+  } catch (err) {
+    status.databaseConnection = `FAILED: ${err.message}`;
+  }
+  res.set('Cache-Control', 'no-store').json(status);
+}));
 
 app.get('/api/config', (req, res) => res.json({ appName: APP_NAME, demo: DEMO, baseUrl: BASE_URL }));
 
