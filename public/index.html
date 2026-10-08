@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%23006bff%22/%3E%3Cpath d=%22M22 11.5a8 8 0 1 0 0 9%22 stroke=%22white%22 stroke-width=%223.4%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E">
+<title>Slotly — Easy scheduling ahead</title>
+<meta name="description" content="Share your booking link, let people pick a time that works, and get it on your Google Calendar automatically.">
+</head>
+<body style="background:#fff">
+<nav class="landing-nav">
+  <a class="brand" href="/?home=1"><span class="brand-mark" id="logo"></span><span id="brand-name">Slotly</span></a>
+  <span class="spacer"></span>
+  <a class="btn btn-ghost" href="/auth/google">Log In</a>
+  <a class="btn btn-primary" href="/auth/google">Get started</a>
+</nav>
+<section class="hero">
+  <div>
+    <h1>Easy scheduling <em>ahead</em></h1>
+    <p>Share your booking page, let people pick a time that works, and every meeting lands on your Google Calendar with invites sent to everyone.</p>
+    <a class="google-btn" href="/auth/google"><span class="g" id="g-logo"></span>Sign up with Google</a>
+    <p class="demo-note" id="demo-note" hidden>Google sign-in isn't configured on this server yet, so this opens a demo account.</p>
+  </div>
+  <div class="hero-art" aria-hidden="true">
+    <div class="mini-card">
+      <div class="row"><span class="avatar" style="width:36px;height:36px;font-size:13px">JD</span><div><div class="faint small" style="font-weight:600">Jamie Doe</div><strong>30 Minute Meeting</strong></div></div>
+      <div class="mini-grid" id="mini-grid"></div>
+      <div class="mini-times"><span>9:00am</span><span>10:30am</span><span>2:00pm</span></div>
+    </div>
+  </div>
+</section>
+<section class="features">
+  <div class="feature"><div class="ficon" data-icon="calendar"></div><h3>Syncs with Google Calendar</h3><p>Busy times on your calendars are hidden automatically, so you're never double-booked.</p></div>
+  <div class="feature"><div class="ficon" data-icon="mail"></div><h3>Invites sent for you</h3><p>Every booking creates a calendar event with a Google Meet link and emails invites to all guests.</p></div>
+  <div class="feature"><div class="ficon" data-icon="share"></div><h3>Share anywhere</h3><p>Send your link, paste available times into an email, or embed your page on your website.</p></div>
+</section>
+<script src="/js/common.js"></script>
+<script>
+  document.getElementById('logo').innerHTML = S.icons.logo;
+  document.getElementById('g-logo').innerHTML = S.icons.google;
+  document.querySelectorAll('[data-icon]').forEach((el) => { el.innerHTML = S.icons[el.dataset.icon]; });
+  const grid = document.getElementById('mini-grid');
+  grid.innerHTML = ['M','T','W','T','F','S','S'].map((d) => '<span style="font-weight:600;color:#1a1a1a">' + d + '</span>').join('') +
+    Array.from({ length: 28 }, (_, i) => '<span class="' + (i === 9 ? 's' : [2, 3, 8, 10, 15, 16, 17, 22, 24].includes(i) ? 'a' : '') + '">' + (i + 1) + '</span>').join('');
+  S.api('/api/config').then((cfg) => {
+    document.getElementById('brand-name').textContent = cfg.appName;
+    document.title = cfg.appName + ' — Easy scheduling ahead';
+    document.getElementById('demo-note').hidden = !cfg.demo;
+  }).catch(() => {});
+  const err = new URLSearchParams(location.search).get('error');
+  if (err) S.toast(err === 'access_denied' ? 'Sign-in was canceled' : 'Sign-in failed: ' + err);
+</script>
+</body>
+</html>

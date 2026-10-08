@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%23006bff%22/%3E%3Cpath d=%22M22 11.5a8 8 0 1 0 0 9%22 stroke=%22white%22 stroke-width=%223.4%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E">
+<title>Slotly</title>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="/app"><span class="brand-mark" id="logo"></span><span id="brand-name">Slotly</span></a>
+    <button class="btn btn-primary btn-block create-btn" data-route="/app/invites/new"><span id="plus"></span>Send specific times</button>
+    <nav class="nav" id="nav">
+      <a href="/app" data-view="events"><span data-icon="link"></span>Scheduling</a>
+      <a href="/app/invites" data-view="invites"><span data-icon="mail"></span>Invite links</a>
+      <a href="/app/meetings" data-view="meetings"><span data-icon="calendar"></span>Meetings</a>
+      <a href="/app/availability" data-view="availability"><span data-icon="hours"></span>Availability</a>
+      <a href="/app/settings" data-view="settings"><span data-icon="gear"></span>Settings</a>
+    </nav>
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+  <div class="main-wrap">
+    <header class="topbar"><button class="icon-btn menu-btn" id="menu-btn" aria-label="Menu"></button><span class="spacer"></span><div id="top-user"></div></header>
+    <div id="banner"></div>
+    <main class="main" id="view"><div class="spinner"></div></main>
+  </div>
+</div>
+<script src="/js/common.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

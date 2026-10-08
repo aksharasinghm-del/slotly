@@ -1,0 +1,28 @@
+# One-click deploy on Render: https://render.com/deploy
+services:
+  - type: web
+    name: slotly
+    runtime: node
+    plan: starter            # paid plan required for a persistent disk (keeps your bookings)
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/config
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /var/data/slotly.db
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ALLOWED_EMAILS
+        sync: false
