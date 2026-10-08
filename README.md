@@ -74,7 +74,7 @@ Everything below is free and needs no credit card:
 3. **Google Auth Platform → Branding**: app name `Slotly`, your email as the support and developer contact.
 4. **Audience**: choose **External**, then click **Publish app** so the status says **In production**.
    *This matters: in "Testing" mode Google disconnects your calendar every 7 days.* You don't need Google's verification for your own use. When you sign in, Google shows "Google hasn't verified this app". Click **Advanced → Go to Slotly** to continue.
-5. **Data Access → Add or remove scopes**: add `.../auth/calendar.events`, `.../auth/calendar.readonly` and `.../auth/gmail.send`.
+5. **Data Access → Add or remove scopes**: add `.../auth/calendar.events`, `.../auth/calendar.freebusy`, `.../auth/calendar.calendarlist.readonly` and `.../auth/gmail.send`.
 6. **Clients → Create client → Web application**. Under **Authorized redirect URIs** add
    `https://YOUR-SITE.vercel.app/auth/google/callback` (use your real Vercel address).
 7. Copy the **Client ID** and **Client secret** into Vercel → your project → **Settings → Environment Variables** as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Also add `ALLOWED_EMAILS` = your Gmail address, so only you can sign in as the host.

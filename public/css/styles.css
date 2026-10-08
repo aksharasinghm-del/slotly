@@ -516,3 +516,9 @@ details.adv summary { cursor: pointer; font-weight: 600; color: var(--blue); mar
 .req-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
 .req-main .msg { white-space: pre-line; color: var(--text); font-size: 14px; background: var(--bg); border-radius: 6px; padding: 8px 12px; margin-top: 4px; overflow-wrap: anywhere; }
 @media (max-width: 860px) { .request-card { padding: 28px 16px; } .req-row { flex-direction: column; padding: 16px; } }
+
+/* landing: data use */
+.data-use { max-width: 820px; margin: 0 auto; padding: 0 32px 56px; color: var(--muted); }
+.data-use h2 { font-size: 22px; margin-bottom: 10px; }
+.data-use li { margin: 6px 0; }
+@media (max-width: 900px) { .data-use { padding: 0 16px 40px; } }
