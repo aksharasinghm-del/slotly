@@ -4,7 +4,7 @@
   const view = document.getElementById('view');
   const COLORS = ['#ff4f00', '#f8e436', '#e55cff', '#8247f5', '#0099ff', '#0ae8f0', '#17e885', '#ccf000', '#ffa600'];
   const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const ROUTES = { '/app': 'events', '/app/invites': 'invites', '/app/invites/new': 'newInvite', '/app/meetings': 'meetings', '/app/availability': 'availability', '/app/settings': 'settings' };
+  const ROUTES = { '/app': 'events', '/app/invites': 'invites', '/app/invites/new': 'newInvite', '/app/meetings': 'meetings', '/app/requests': 'requests', '/app/availability': 'availability', '/app/settings': 'settings' };
 
   let me, cfg, eventTypes = [];
 
@@ -43,6 +43,8 @@
     document.getElementById('side-foot').innerHTML = `
       <a class="btn btn-text" href="/${esc(me.username)}" target="_blank" rel="noopener" style="justify-content:flex-start">${icons.external} View landing page</a>
       <button class="btn btn-text" data-action="logout" style="justify-content:flex-start;color:var(--muted)">${icons.logout} Log out</button>`;
+    document.getElementById('nav-requests').hidden = !me.isAdmin;
+    if (me.isAdmin) refreshRequestCount();
     const banner = document.getElementById('banner');
     if (cfg.demo) {
       banner.innerHTML = `<div class="banner">${icons.alert}<span><strong>Demo mode.</strong> Google sign-in isn't configured on this server, so bookings won't sync to Google Calendar or send invites. See the README to add your Google OAuth credentials.</span></div>`;
@@ -59,7 +61,7 @@
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === name || (name === 'newInvite' && a.dataset.view === 'invites')));
     document.getElementById('sidebar').classList.remove('open');
     view.innerHTML = '<div class="spinner"></div>';
-    ({ events: renderEvents, invites: renderInvites, newInvite: renderNewInvite, meetings: renderMeetings, availability: renderAvailability, settings: renderSettings })[name]();
+    ({ events: renderEvents, invites: renderInvites, newInvite: renderNewInvite, meetings: renderMeetings, requests: renderRequests, availability: renderAvailability, settings: renderSettings })[name]();
     window.scrollTo({ top: 0 });
   }
 
@@ -924,6 +926,60 @@
         btn.disabled = false; btn.textContent = 'Create invite link';
         $('n-error').textContent = err.message;
       }
+    });
+  }
+
+  // ---------- access requests (invite-only mode, site owner only) ----------
+
+  async function refreshRequestCount() {
+    try {
+      const { requests } = await api('/api/access-requests');
+      const n = requests.filter((r) => r.status === 'pending').length;
+      const badge = document.getElementById('req-count');
+      badge.textContent = n;
+      badge.hidden = !n;
+    } catch { /* not an admin */ }
+  }
+
+  async function renderRequests() {
+    const { requests, canSendEmail } = await api('/api/access-requests');
+    const signupUrl = `${cfg.baseUrl}/request-access`;
+    view.innerHTML = `<h1 class="page-title">Access requests</h1>
+      <div class="owner-strip"><p class="muted" style="margin:0;flex:1;min-width:240px">People who asked to use ${esc(cfg.appName)} for their own bookings. Approve someone and they can sign in with Google${canSendEmail ? ', and they get an email telling them so' : ''}. Your clients never need this; they book from your link without an account.</p>
+        <button class="btn btn-ghost" data-copy-signup>${icons.copy} Copy request link</button></div>
+      <div id="req-list"></div>`;
+    view.querySelector('[data-copy-signup]').addEventListener('click', () => S.copy(signupUrl));
+    const box = document.getElementById('req-list');
+    if (!requests.length) {
+      box.innerHTML = `<div class="empty">${icons.users}<h3>No requests yet</h3><p>When someone asks for access on ${esc(signupUrl.replace(/^https?:\/\//, ''))}, they'll show up here and you'll get an email.</p></div>`;
+      return;
+    }
+    const label = { pending: ['Waiting', 'badge-warn'], approved: ['Approved', 'badge-ok'], declined: ['Declined', 'badge-danger'] };
+    box.innerHTML = `<div class="panel">${requests.map((r) => `<div class="req-row" data-id="${r.id}">
+        <div class="req-main">
+          <div class="row" style="flex-wrap:wrap"><strong>${esc(r.name)}</strong><span class="badge ${label[r.status][1]}">${label[r.status][0]}</span></div>
+          <div class="small"><a href="mailto:${esc(r.email)}">${esc(r.email)}</a>${r.company ? ` · ${esc(r.company)}` : ''}</div>
+          <div class="muted small">${esc(r.purpose || '')}${r.purpose ? ' · ' : ''}${esc(S.fmtDate(Date.parse(r.createdAt), me.timezone, { month: 'short', day: 'numeric', year: 'numeric' }))}</div>
+          ${r.message ? `<div class="msg">${esc(r.message)}</div>` : ''}
+        </div>
+        <div class="inv-actions">
+          ${r.status !== 'approved' ? `<button class="btn btn-primary btn-sm" data-decide="approve">${icons.check} Approve</button>` : ''}
+          ${r.status === 'pending' ? '<button class="btn btn-ghost btn-sm" data-decide="decline">Decline</button>' : ''}
+        </div>
+      </div>`).join('')}</div>`;
+    box.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-decide]');
+      if (!b) return;
+      const r = requests.find((x) => x.id === Number(b.closest('.req-row').dataset.id));
+      b.disabled = true;
+      try {
+        const res = await api(`/api/access-requests/${r.id}/${b.dataset.decide}`, { method: 'POST' });
+        S.toast(b.dataset.decide === 'approve'
+          ? (res.emailed ? `Approved. ${r.name} has been emailed.` : `Approved. Let ${r.name} know they can sign in.`)
+          : 'Request declined');
+        renderRequests();
+        refreshRequestCount();
+      } catch (err) { b.disabled = false; S.toast(err.message); }
     });
   }
 

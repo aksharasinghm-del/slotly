@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%23006bff%22/%3E%3Cpath d=%22M22 11.5a8 8 0 1 0 0 9%22 stroke=%22white%22 stroke-width=%223.4%22 fill=%22none%22 stroke-linecap=%22round%22/%3E%3C/svg%3E">
+<title>Request access | Slotly</title>
+</head>
+<body>
+<main class="public-page">
+  <div class="public-card request-card" id="root">
+    <a class="brand" href="/?home=1" style="justify-content:center;margin-bottom:22px"><span class="brand-mark" id="logo"></span><span class="app-name">Slotly</span></a>
+    <div id="denied" class="banner info" style="margin:0 0 20px" hidden></div>
+    <div id="form-view">
+      <h1>Slotly is invite-only</h1>
+      <p class="lead muted">This scheduling tool is available to invited clients only. Want your own booking page to get meetings booked? Raise a request below and you'll get an email once you're approved.</p>
+      <p class="note-box" style="margin:0 0 22px">Here to <strong>book a meeting</strong>? You don't need an account. Just open the booking link you were sent.</p>
+      <form id="request-form" novalidate>
+        <div id="form-error"></div>
+        <div class="grid-2">
+          <div class="field"><label for="r-name">Your name *</label><input class="input" id="r-name" name="name" autocomplete="name" required></div>
+          <div class="field"><label for="r-email">Email *</label><input class="input" id="r-email" name="email" type="email" autocomplete="email" required></div>
+        </div>
+        <div class="field"><label for="r-company">Business or company</label><input class="input" id="r-company" name="company" autocomplete="organization" placeholder="Optional"></div>
+        <div class="field"><label for="r-purpose">What will you use it for?</label>
+          <select class="input" id="r-purpose" name="purpose">
+            <option value="Client meetings for my business">Client meetings for my business</option>
+            <option value="Sales calls and demos">Sales calls and demos</option>
+            <option value="Consultations or coaching">Consultations or coaching</option>
+            <option value="Interviews and hiring">Interviews and hiring</option>
+            <option value="Personal use">Personal use</option>
+            <option value="Something else">Something else</option>
+          </select></div>
+        <div class="field"><label for="r-message">Anything else? (optional)</label><textarea class="input" id="r-message" name="message" rows="3" placeholder="Tell us a little about how you'd use it"></textarea></div>
+        <div class="hp" aria-hidden="true"><label>Website <input name="website" tabindex="-1" autocomplete="off"></label></div>
+        <button class="btn btn-primary btn-lg btn-block" type="submit">Request access</button>
+      </form>
+      <p class="hint" style="text-align:center;margin-top:18px">Already approved? <a href="/auth/google">Log in with Google</a></p>
+    </div>
+    <div id="done-view" hidden style="text-align:center">
+      <div class="ok-badge" id="ok-icon"></div>
+      <h1>Request sent</h1>
+      <p class="lead muted" id="done-text">Thanks! We'll email you as soon as your access is approved.</p>
+      <a class="btn btn-outline" href="/?home=1">Back to home</a>
+    </div>
+  </div>
+</main>
+<script src="/js/common.js"></script>
+<script src="/js/request.js"></script>
+</body>
+</html>

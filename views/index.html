@@ -15,13 +15,14 @@
   <a class="brand" href="/?home=1"><span class="brand-mark" id="logo"></span><span id="brand-name">Slotly</span></a>
   <span class="spacer"></span>
   <a class="btn btn-ghost" href="/auth/google">Log In</a>
-  <a class="btn btn-primary" href="/auth/google">Get started</a>
+  <a class="btn btn-primary" href="/auth/google" id="nav-cta">Get started</a>
 </nav>
 <section class="hero">
   <div>
     <h1>Easy scheduling <em>ahead</em></h1>
     <p>Share your booking page, let people pick a time that works, and every meeting lands on your Google Calendar with invites sent to everyone.</p>
-    <a class="google-btn" href="/auth/google"><span class="g" id="g-logo"></span>Sign up with Google</a>
+    <a class="google-btn" href="/auth/google" id="hero-cta"><span class="g" id="g-logo"></span><span id="hero-cta-text">Sign up with Google</span></a>
+    <p class="demo-note" id="invite-note" hidden>Invite-only. Here to book a meeting? Just use the link you were sent, no account needed.</p>
     <p class="demo-note" id="demo-note" hidden>Google sign-in isn't configured on this server yet, so this opens a demo account.</p>
   </div>
   <div class="hero-art" aria-hidden="true">
@@ -50,6 +51,13 @@
     document.getElementById('brand-name').textContent = cfg.appName;
     document.title = cfg.appName + ' — Easy scheduling ahead';
     document.getElementById('demo-note').hidden = !cfg.demo;
+    if (cfg.inviteOnly) {
+      for (const id of ['nav-cta', 'hero-cta']) document.getElementById(id).href = '/request-access';
+      document.getElementById('nav-cta').textContent = 'Request access';
+      document.getElementById('hero-cta-text').textContent = 'Request access';
+      document.getElementById('g-logo').hidden = true;
+      document.getElementById('invite-note').hidden = false;
+    }
   }).catch(() => {});
   const err = new URLSearchParams(location.search).get('error');
   if (err) S.toast(err === 'access_denied' ? 'Sign-in was canceled' : 'Sign-in failed: ' + err);

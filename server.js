@@ -10,7 +10,7 @@ import { computeSlots } from './lib/slots.js';
 import { buildIcs } from './lib/ics.js';
 import { isValidTimeZone, zonedParts, zonedToUtc } from './lib/time.js';
 import { suggestTimes } from './lib/suggest.js';
-import { inviteEmail } from './lib/email.js';
+import { inviteEmail, accessRequestEmail, accessApprovedEmail } from './lib/email.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,12 +19,15 @@ const BASE_URL = (process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL
   || `http://localhost:${PORT}`).replace(/\/$/, '');
 // Optional comma-separated list of Google accounts allowed to sign in as hosts.
 const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+// With an allow-list set, the site is invite-only: those emails are admins, everyone else must request access.
+const INVITE_ONLY = ALLOWED_EMAILS.length > 0;
+const isAdmin = (u) => !INVITE_ONLY || ALLOWED_EMAILS.includes(String(u.email).toLowerCase());
 const APP_NAME = process.env.APP_NAME || 'Slotly';
 const DEMO = !google.enabled();
 const REDIRECT_URI = `${BASE_URL}/auth/google/callback`;
 
 const RESERVED = new Set(['app', 'api', 'auth', 'booking', 'p', 'css', 'js', 'img', 'assets', 'login', 'logout',
-  'signup', 'admin', 'settings', 'help', 'privacy', 'terms', 'favicon.ico', 'robots.txt', 'about', 'pricing']);
+  'signup', 'admin', 'settings', 'help', 'privacy', 'terms', 'request-access', 'favicon.ico', 'robots.txt', 'about', 'pricing']);
 const LOCATION_TYPES = ['meet', 'phone', 'in_person', 'custom'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -289,6 +292,88 @@ async function cancelBooking(booking, reason, by) {
   return await get('SELECT * FROM bookings WHERE id = ?', booking.id);
 }
 
+// ---------- invite-only access ----------
+
+async function canSignIn(email) {
+  if (!INVITE_ONLY) return true;
+  const e = String(email || '').toLowerCase();
+  if (ALLOWED_EMAILS.includes(e)) return true;
+  if (await get(`SELECT 1 FROM access_requests WHERE lower(email) = ? AND status = 'approved'`, e)) return true;
+  return Boolean(await get('SELECT 1 FROM users WHERE lower(email) = ?', e));
+}
+
+async function requireAdmin(req, res, next) {
+  await requireAuth(req, res, (err) => {
+    if (err) return next(err);
+    if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only the site owner can do this' });
+    next();
+  });
+}
+
+/** Admin accounts that can send email from their Gmail (used for notifications). */
+async function mailerAdmins() {
+  if (!INVITE_ONLY) return [];
+  const rows = await all(`SELECT * FROM users WHERE lower(email) IN (${ALLOWED_EMAILS.map(() => '?').join(',')})`, ...ALLOWED_EMAILS);
+  return rows.filter((u) => google.canSendEmail(u));
+}
+
+const serializeRequest = (r) => ({
+  id: r.id, name: r.name, email: r.email, company: r.company, purpose: r.purpose, message: r.message,
+  status: r.status, createdAt: new Date(r.created_at).toISOString(),
+});
+
+app.post('/api/access-requests', wrap(async (req, res) => {
+  const b = req.body;
+  if (b.website) return res.json({ ok: true }); // honeypot field: bots fill it, people never see it
+  const name = String(b.name || '').trim().slice(0, 200);
+  const email = String(b.email || '').trim().toLowerCase().slice(0, 254);
+  if (!name) fail(400, 'Please enter your name');
+  if (!EMAIL_RE.test(email)) fail(400, 'Please enter a valid email address');
+  const fields = [String(b.company || '').trim().slice(0, 200), String(b.purpose || '').trim().slice(0, 200), String(b.message || '').trim().slice(0, 2000)];
+  const existing = await get('SELECT * FROM access_requests WHERE lower(email) = ? ORDER BY id DESC', email);
+  if (existing?.status === 'approved') return res.json({ ok: true, status: 'approved' });
+  let request;
+  if (existing?.status === 'pending') {
+    await run('UPDATE access_requests SET name = ?, company = ?, purpose = ?, message = ? WHERE id = ?', name, ...fields, existing.id);
+    return res.json({ ok: true, status: 'pending' }); // already notified once
+  }
+  const { lastInsertRowid } = await run(
+    'INSERT INTO access_requests (name, email, company, purpose, message, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    name, email, ...fields, Date.now());
+  request = await get('SELECT * FROM access_requests WHERE id = ?', lastInsertRowid);
+  for (const admin of await mailerAdmins()) {
+    try {
+      await google.sendEmail(admin, { to: admin.email, ...accessRequestEmail({ request, reviewUrl: `${BASE_URL}/app/requests`, appName: APP_NAME }) });
+    } catch (err) {
+      console.error('Access request email failed:', err.message);
+    }
+  }
+  res.status(201).json({ ok: true, status: 'pending' });
+}));
+
+app.get('/api/access-requests', requireAdmin, wrap(async (req, res) => {
+  const rows = await all('SELECT * FROM access_requests ORDER BY (status = \'pending\') DESC, created_at DESC LIMIT 500');
+  res.json({ requests: rows.map(serializeRequest), canSendEmail: google.canSendEmail(req.user) });
+}));
+
+app.post('/api/access-requests/:id/:decision', requireAdmin, wrap(async (req, res) => {
+  const decision = { approve: 'approved', decline: 'declined' }[req.params.decision];
+  if (!decision) fail(404, 'Unknown action');
+  const r = await get('SELECT * FROM access_requests WHERE id = ?', req.params.id);
+  if (!r) fail(404, 'Request not found');
+  await run('UPDATE access_requests SET status = ?, decided_at = ? WHERE id = ?', decision, Date.now(), r.id);
+  let emailed = false;
+  if (decision === 'approved' && google.canSendEmail(req.user)) {
+    try {
+      await google.sendEmail(req.user, { to: r.email, ...accessApprovedEmail({ name: r.name, signInUrl: `${BASE_URL}/?home=1`, hostName: req.user.name, appName: APP_NAME }) });
+      emailed = true;
+    } catch (err) {
+      console.error('Approval email failed:', err.message);
+    }
+  }
+  res.json({ request: serializeRequest(await get('SELECT * FROM access_requests WHERE id = ?', r.id)), emailed });
+}));
+
 // ---------- auth ----------
 
 app.get('/auth/google', wrap(async (req, res) => {
@@ -304,8 +389,9 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   delete req.session.state;
   const tokens = await google.exchangeCode(String(req.query.code), REDIRECT_URI);
   const profile = await google.userInfo(tokens.access_token);
-  if (ALLOWED_EMAILS.length && !ALLOWED_EMAILS.includes(String(profile.email).toLowerCase())) {
-    return res.redirect('/?error=not_allowed');
+  if (!(await canSignIn(profile.email))) {
+    const q = new URLSearchParams({ denied: '1', email: profile.email || '', name: profile.name || '' });
+    return res.redirect(`/request-access?${q}`);
   }
   let user = await get('SELECT * FROM users WHERE google_id = ?', profile.sub);
   if (user) {
@@ -353,16 +439,17 @@ app.get('/api/health', wrap(async (req, res) => {
   res.set('Cache-Control', 'no-store').json(status);
 }));
 
-app.get('/api/config', (req, res) => res.json({ appName: APP_NAME, demo: DEMO, baseUrl: BASE_URL }));
+app.get('/api/config', (req, res) => res.json({ appName: APP_NAME, demo: DEMO, baseUrl: BASE_URL, inviteOnly: INVITE_ONLY }));
 
 app.get('/api/me', requireAuth, wrap(async (req, res) => {
   const u = req.user;
   res.json({
     user: {
       ...publicUser(u), email: u.email, onboarded: Boolean(u.onboarded),
-      googleConnected: Boolean(u.refresh_token), canSendEmail: google.canSendEmail(u), conflictCalendars: JSON.parse(u.conflict_calendars),
+      googleConnected: Boolean(u.refresh_token), canSendEmail: google.canSendEmail(u),
+      isAdmin: INVITE_ONLY && isAdmin(u), conflictCalendars: JSON.parse(u.conflict_calendars),
     },
-    demo: DEMO, appName: APP_NAME, baseUrl: BASE_URL,
+    demo: DEMO, appName: APP_NAME, baseUrl: BASE_URL, inviteOnly: INVITE_ONLY,
   });
 }));
 
@@ -841,6 +928,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 const page = (name, status = 200) => (req, res) => res.status(status).type('html').set('Cache-Control', 'no-cache').send(renderPage(name));
 app.get('/', wrap(async (req, res, next) => ((await currentUser(req)) && !req.query.home ? res.redirect('/app') : next())), page('index'));
 app.get('/privacy', page('privacy'));
+app.get('/request-access', page('request'));
 app.get(['/app', '/app/*'], page('app'));
 app.get('/booking/:uid', page('manage'));
 app.get('/p/:token', page('invite'));
