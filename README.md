@@ -35,48 +35,54 @@ Share a booking link, let people pick a free time, and every booking lands on yo
 
 ## Run locally
 
-Requires **Node.js 22.13+**. The app uses the built-in `node:sqlite`, so there is no database to install.
+Requires Node.js 22.
 
 ```bash
 npm install
-cp .env.example .env    # then fill it in (see below)
-node --env-file=.env --disable-warning=ExperimentalWarning server.js
+node --env-file=.env server.js    # or just `npm start` for demo mode
 ```
 
-Open http://localhost:3000. If no Google credentials are set, the app runs in **demo mode**: you can click through everything, but nothing syncs to Google.
+Open http://localhost:3000. If no Google credentials are set, the app runs in **demo mode**: you can click through everything, but nothing syncs to Google. Data is kept in `data/slotly.db` unless `TURSO_DATABASE_URL` is set.
 
-## Connect Google Calendar (one-time setup, about 10 minutes)
+## Put it online for free
 
-1. Go to https://console.cloud.google.com/ and create a project.
-2. **APIs & Services → Library**: enable the **Google Calendar API**.
-3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
-   - User type **External**, fill in the app name and your email.
-   - Scopes: `openid`, `email`, `profile`, `.../auth/calendar.events`, `.../auth/calendar.readonly`, `.../auth/gmail.send` (lets the app send invite emails from your Gmail).
-   - Also enable the **Gmail API** under APIs & Services → Library.
-   - Under **Test users**, add your own Gmail address. While the app is in "Testing", only test users can sign in, which is fine when you are the only host.
-4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
-   - Application type: **Web application**
-   - Authorized redirect URI: `http://localhost:3000/auth/google/callback`, and later also `https://YOUR-DOMAIN/auth/google/callback`
-5. Copy the Client ID and Client secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Set `SESSION_SECRET` to a long random string.
-6. Restart the server and click **Sign up with Google**.
+Everything below is free and needs no credit card:
 
-> Invitees never sign in. Only you (the host) connect Google. Invitees just get the email invite.
+| What | Service | Free plan |
+|---|---|---|
+| Website | [Vercel](https://vercel.com) (Hobby) | Sign in with GitHub |
+| Database | [Turso](https://turso.tech) | 5 GB storage, 100 databases |
+| Calendar + Gmail | Google Cloud | Free for personal use |
 
-## Deploy (put it on the internet)
+### Step 1: Database (Turso, about 3 minutes)
+1. Go to https://app.turso.tech and sign up with GitHub.
+2. Click **Create Database**, name it `slotly`, and pick the region closest to you.
+3. On the database page, copy the **URL** (starts with `libsql://`).
+4. Click **Create Token** and copy it.
 
-This repo includes a `render.yaml`, so Render sets everything up for you.
+### Step 2: Website (Vercel, about 3 minutes)
+1. Go to https://vercel.com/new and sign in with GitHub (choose the free **Hobby** plan).
+2. Import the `slotly` repository. Vercel detects the Express app automatically, so don't change any build settings.
+3. Open **Environment Variables** and add:
+   - `TURSO_DATABASE_URL`: the URL from step 1
+   - `TURSO_AUTH_TOKEN`: the token from step 1
+4. Click **Deploy**. Your site is live at `https://slotly-xxxx.vercel.app` (it runs in demo mode until step 3).
 
-1. Create a free account at https://render.com and sign in with GitHub.
-2. Open **https://render.com/deploy?repo=https://github.com/OWNER/REPO**, replacing it with this repo's URL, or in Render click **New → Blueprint** and pick this repo.
-3. Render asks for three values. You can leave all of them empty for now:
-   - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`: from the Google setup above. Empty means demo mode.
-   - `ALLOWED_EMAILS`: your Gmail address, so only you can sign in as a host.
-4. Click **Apply**. After a few minutes your site is live at `https://slotly-xxxx.onrender.com`.
-5. Back in Google Cloud, add `https://slotly-xxxx.onrender.com/auth/google/callback` as an authorized redirect URI. Then paste the Client ID and Secret into Render → your service → **Environment**. Render restarts the app automatically.
+### Step 3: Connect Google (about 10 minutes, one time)
+1. Go to https://console.cloud.google.com and create a project called `Slotly`.
+2. **APIs & Services → Library**: enable **Google Calendar API** and **Gmail API**.
+3. **Google Auth Platform → Branding**: app name `Slotly`, your email as the support and developer contact.
+4. **Audience**: choose **External**, then click **Publish app** so the status says **In production**.
+   *This matters: in "Testing" mode Google disconnects your calendar every 7 days.* You don't need Google's verification for your own use. When you sign in, Google shows "Google hasn't verified this app". Click **Advanced → Go to Slotly** to continue.
+5. **Data Access → Add or remove scopes**: add `.../auth/calendar.events`, `.../auth/calendar.readonly` and `.../auth/gmail.send`.
+6. **Clients → Create client → Web application**. Under **Authorized redirect URIs** add
+   `https://YOUR-SITE.vercel.app/auth/google/callback` (use your real Vercel address).
+7. Copy the **Client ID** and **Client secret** into Vercel → your project → **Settings → Environment Variables** as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Also add `ALLOWED_EMAILS` = your Gmail address, so only you can sign in as the host.
+8. In Vercel go to **Deployments → ⋯ → Redeploy**. Then open your site and click **Sign up with Google**.
 
-Cost: Render's **Starter** plan (about $7/month) plus a 1 GB disk (about $0.25/month). The disk is what keeps your bookings and settings safe across restarts. Render's free plan wipes data on every restart, so it isn't used.
-
-Other hosts: any server with Node 22 and a persistent folder works. There's a `Dockerfile` for Railway or Fly.io; mount a volume and set `DATABASE_PATH` to a file inside it.
+### Notes on the free plans
+- Vercel's Hobby plan is meant for personal, non-commercial projects. If you use Slotly for a business, the free alternative is **Render**, which allows commercial use: sign in at https://render.com, click **New → Blueprint**, pick this repo (it includes `render.yaml`), and paste the same values. Free Render apps sleep when idle, so the first visit after a quiet period takes about a minute to load.
+- Both options keep your data in Turso, so redeploys and restarts never lose bookings.
 
 ## Project layout
 
@@ -88,13 +94,15 @@ lib/time.js          Time-zone math (Intl based, no dependencies)
 lib/suggest.js       Smart time suggestions for invite links
 lib/email.js         Invite email (HTML + text) sent through Gmail
 lib/ics.js           .ics calendar file generation
-lib/db.js            SQLite schema
+lib/db.js            Database (local SQLite file or Turso)
+lib/pages.js         HTML pages bundled from views/ (npm run build:pages)
+views/               HTML page templates
 public/              Landing page, dashboard (app.js), booking/profile/manage pages
 test/                Unit tests: npm test
 ```
 
 ## Notes and limits
 
-- Google refresh tokens are stored in the SQLite database. Keep the database file private and back it up.
+- Google refresh tokens are stored in your database. Keep the Turso token private.
 - Bookings are one-on-one. Group or round-robin events, paid bookings, and SMS reminders are not included.
 - Events deleted directly in Google Calendar are not synced back into the Meetings list. Cancel from the app to keep both in sync.

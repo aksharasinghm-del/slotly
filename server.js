@@ -3,7 +3,8 @@ import cookieSession from 'cookie-session';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { get, all, run, transaction } from './lib/db.js';
+import { get, all, run, batch } from './lib/db.js';
+import { renderPage } from './lib/pages.js';
 import * as google from './lib/google.js';
 import { computeSlots } from './lib/slots.js';
 import { buildIcs } from './lib/ics.js';
@@ -13,7 +14,9 @@ import { inviteEmail } from './lib/email.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-const BASE_URL = (process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const BASE_URL = (process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL
+  || (process.env.VERCEL_PROJECT_PRODUCTION_URL && `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`)
+  || `http://localhost:${PORT}`).replace(/\/$/, '');
 // Optional comma-separated list of Google accounts allowed to sign in as hosts.
 const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 const APP_NAME = process.env.APP_NAME || 'Slotly';
@@ -25,10 +28,10 @@ const RESERVED = new Set(['app', 'api', 'auth', 'booking', 'p', 'css', 'js', 'im
 const LOCATION_TYPES = ['meet', 'phone', 'in_person', 'custom'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-if (!process.env.SESSION_SECRET && process.env.NODE_ENV === 'production') {
-  console.error('SESSION_SECRET must be set in production.');
-  process.exit(1);
-}
+// Cookie signing key. Falls back to one derived from the Google client secret so there's one less setting to configure.
+const SESSION_SECRET = process.env.SESSION_SECRET
+  || (process.env.GOOGLE_CLIENT_SECRET && crypto.createHash('sha256').update(`slotly-session:${process.env.GOOGLE_CLIENT_SECRET}`).digest('hex'))
+  || 'dev-only-secret';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -36,7 +39,7 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieSession({
   name: 'slotly',
-  keys: [process.env.SESSION_SECRET || 'dev-only-secret'],
+  keys: [SESSION_SECRET],
   maxAge: 30 * 24 * 3600 * 1000,
   sameSite: 'lax',
   secure: BASE_URL.startsWith('https://'),
@@ -55,30 +58,34 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 const slugify = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[^\w\s-]/g, '')
   .trim().replace(/[\s_]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 
-function uniqueUsername(base) {
+async function uniqueUsername(base) {
   let name = slugify(base).replace(/[^a-z0-9-]/g, '') || 'user';
   if (name.length < 3) name = `${name}-cal`;
   let candidate = name, n = 1;
-  while (RESERVED.has(candidate) || get('SELECT 1 FROM users WHERE username = ?', candidate)) candidate = `${name}-${++n}`;
+  while (RESERVED.has(candidate) || await get('SELECT 1 FROM users WHERE username = ?', candidate)) candidate = `${name}-${++n}`;
   return candidate;
 }
 
-function uniqueSlug(userId, base, exceptId = 0) {
+async function uniqueSlug(userId, base, exceptId = 0) {
   const name = slugify(base) || 'meeting';
   let candidate = name, n = 1;
-  while (get('SELECT 1 FROM event_types WHERE user_id = ? AND slug = ? AND id != ?', userId, candidate, exceptId)) candidate = `${name}-${++n}`;
+  while (await get('SELECT 1 FROM event_types WHERE user_id = ? AND slug = ? AND id != ?', userId, candidate, exceptId)) candidate = `${name}-${++n}`;
   return candidate;
 }
 
-function currentUser(req) {
-  return req.session?.uid ? get('SELECT * FROM users WHERE id = ?', req.session.uid) : null;
+async function currentUser(req) {
+  return req.session?.uid ? await get('SELECT * FROM users WHERE id = ?', req.session.uid) : null;
 }
 
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'Not signed in' });
-  req.user = user;
-  next();
+async function requireAuth(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (!user) return res.status(401).json({ error: 'Not signed in' });
+    req.user = user;
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 const publicUser = (u) => ({ name: u.name, username: u.username, picture: u.picture, timezone: u.timezone, welcome: u.welcome });
@@ -154,35 +161,33 @@ function validateEventType(body, existing = {}) {
   return v;
 }
 
-function createUser({ googleId, email, name, picture, tokens }) {
-  return transaction(() => {
-    const now = Date.now();
-    const { lastInsertRowid } = run(
+async function createUser({ googleId, email, name, picture, tokens }) {
+  const now = Date.now();
+  const { lastInsertRowid } = await run(
       `INSERT INTO users (google_id, email, name, picture, username, access_token, refresh_token, token_expiry, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      googleId, email, name || email, picture || null, uniqueUsername(email.split('@')[0]),
+      googleId, email, name || email, picture || null, await uniqueUsername(email.split('@')[0]),
       tokens?.access_token || null, tokens?.refresh_token || null,
       tokens?.expires_in ? now + tokens.expires_in * 1000 : null, now);
-    const id = Number(lastInsertRowid);
-    for (const weekday of [1, 2, 3, 4, 5]) run('INSERT INTO availability (user_id, weekday, start_min, end_min) VALUES (?, ?, ?, ?)', id, weekday, 9 * 60, 17 * 60);
-    const defaults = [
-      ['15 Minute Meeting', '15min', 15, '#0ae8f0'],
-      ['30 Minute Meeting', '30min', 30, '#8247f5'],
-      ['60 Minute Meeting', '60min', 60, '#ff4f00'],
-    ];
-    for (const [n, slug, duration, color] of defaults) {
-      run(`INSERT INTO event_types (user_id, name, slug, duration, color, created_at) VALUES (?, ?, ?, ?, ?, ?)`, id, n, slug, duration, color, now);
-    }
-    return get('SELECT * FROM users WHERE id = ?', id);
-  });
+  const id = lastInsertRowid;
+  const defaults = [
+    ['15 Minute Meeting', '15min', 15, '#0ae8f0'],
+    ['30 Minute Meeting', '30min', 30, '#8247f5'],
+    ['60 Minute Meeting', '60min', 60, '#ff4f00'],
+  ];
+  await batch([
+    ...[1, 2, 3, 4, 5].map((weekday) => ['INSERT INTO availability (user_id, weekday, start_min, end_min) VALUES (?, ?, ?, ?)', id, weekday, 9 * 60, 17 * 60]),
+    ...defaults.map(([n, slug, duration, color]) => ['INSERT INTO event_types (user_id, name, slug, duration, color, created_at) VALUES (?, ?, ?, ?, ?, ?)', id, n, slug, duration, color, now]),
+  ]);
+  return get('SELECT * FROM users WHERE id = ?', id);
 }
 
-function loadPublic(req) {
-  const user = get('SELECT * FROM users WHERE username = ?', String(req.params.username).toLowerCase());
+async function loadPublic(req) {
+  const user = await get('SELECT * FROM users WHERE username = ?', String(req.params.username).toLowerCase());
   if (!user) fail(404, 'Page not found');
   let et = null;
   if (req.params.slug) {
-    et = get('SELECT * FROM event_types WHERE user_id = ? AND slug = ?', user.id, req.params.slug);
+    et = await get('SELECT * FROM event_types WHERE user_id = ? AND slug = ?', user.id, req.params.slug);
     if (!et) fail(404, 'Event not found');
   }
   return { user, et };
@@ -190,8 +195,8 @@ function loadPublic(req) {
 
 /** Busy intervals from confirmed bookings and the host's Google calendars. */
 async function getBusy(user, rangeStart, rangeEnd, exclude = null) {
-  const busy = all(`SELECT uid, start_ms AS start, end_ms AS end FROM bookings
-                    WHERE user_id = ? AND status = 'confirmed' AND end_ms > ? AND start_ms < ?`, user.id, rangeStart, rangeEnd)
+  const busy = (await all(`SELECT uid, start_ms AS start, end_ms AS end FROM bookings
+                    WHERE user_id = ? AND status = 'confirmed' AND end_ms > ? AND start_ms < ?`, user.id, rangeStart, rangeEnd))
     .filter((b) => b.uid !== exclude?.uid);
 
   if (user.refresh_token) {
@@ -215,7 +220,7 @@ async function availableSlots(user, et, fromMs, toMs, exclude = null) {
   if (toMs <= fromMs) return [];
   const pad = (et.buffer_before + et.buffer_after + et.duration) * 60000;
   const busy = await getBusy(user, fromMs - pad, toMs + pad, exclude);
-  const rules = all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ?', user.id);
+  const rules = await all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ?', user.id);
   return computeSlots({
     rules, tz: user.timezone, duration: et.duration, interval: et.slot_interval,
     bufferBefore: et.buffer_before, bufferAfter: et.buffer_after, fromMs, toMs, busy,
@@ -260,20 +265,20 @@ async function syncCreate(host, booking) {
   if (!host.refresh_token) return booking;
   try {
     const ev = await google.createEvent(host, googleEventBody(host, booking));
-    run('UPDATE bookings SET google_event_id = ?, google_link = ?, meet_link = ?, sync_error = NULL WHERE id = ?',
+    await run('UPDATE bookings SET google_event_id = ?, google_link = ?, meet_link = ?, sync_error = NULL WHERE id = ?',
       ev.id, ev.htmlLink || null, ev.hangoutLink || null, booking.id);
   } catch (err) {
     console.error('Google event create failed:', err.message);
-    run('UPDATE bookings SET sync_error = ? WHERE id = ?', err.message, booking.id);
+    await run('UPDATE bookings SET sync_error = ? WHERE id = ?', err.message, booking.id);
   }
-  return get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  return await get('SELECT * FROM bookings WHERE id = ?', booking.id);
 }
 
 async function cancelBooking(booking, reason, by) {
   if (booking.status !== 'confirmed') fail(400, 'This event is already canceled');
-  run(`UPDATE bookings SET status = 'cancelled', cancel_reason = ?, cancelled_by = ? WHERE id = ?`,
+  await run(`UPDATE bookings SET status = 'cancelled', cancel_reason = ?, cancelled_by = ? WHERE id = ?`,
     String(reason || '').slice(0, 1000), by, booking.id);
-  const host = get('SELECT * FROM users WHERE id = ?', booking.user_id);
+  const host = await get('SELECT * FROM users WHERE id = ?', booking.user_id);
   if (host.refresh_token && booking.google_event_id) {
     try {
       await google.deleteEvent(host, booking.google_event_id);
@@ -281,17 +286,17 @@ async function cancelBooking(booking, reason, by) {
       console.error('Google event delete failed:', err.message);
     }
   }
-  return get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  return await get('SELECT * FROM bookings WHERE id = ?', booking.id);
 }
 
 // ---------- auth ----------
 
-app.get('/auth/google', (req, res) => {
+app.get('/auth/google', wrap(async (req, res) => {
   if (DEMO) return res.redirect('/auth/demo');
   const state = crypto.randomBytes(16).toString('hex');
   req.session.state = state;
   res.redirect(google.authUrl(state, REDIRECT_URI));
-});
+}));
 
 app.get('/auth/google/callback', wrap(async (req, res) => {
   if (req.query.error) return res.redirect(`/?error=${encodeURIComponent(req.query.error)}`);
@@ -302,38 +307,38 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   if (ALLOWED_EMAILS.length && !ALLOWED_EMAILS.includes(String(profile.email).toLowerCase())) {
     return res.redirect('/?error=not_allowed');
   }
-  let user = get('SELECT * FROM users WHERE google_id = ?', profile.sub);
+  let user = await get('SELECT * FROM users WHERE google_id = ?', profile.sub);
   if (user) {
-    run(`UPDATE users SET email = ?, picture = ?, access_token = ?, token_expiry = ?,
+    await run(`UPDATE users SET email = ?, picture = ?, access_token = ?, token_expiry = ?,
          refresh_token = COALESCE(?, refresh_token), scopes = ? WHERE id = ?`,
       profile.email, profile.picture || null, tokens.access_token, Date.now() + tokens.expires_in * 1000,
       tokens.refresh_token || null, tokens.scope || '', user.id);
   } else {
-    user = createUser({ googleId: profile.sub, email: profile.email, name: profile.name, picture: profile.picture, tokens });
-    run('UPDATE users SET scopes = ? WHERE id = ?', tokens.scope || '', user.id);
+    user = await createUser({ googleId: profile.sub, email: profile.email, name: profile.name, picture: profile.picture, tokens });
+    await run('UPDATE users SET scopes = ? WHERE id = ?', tokens.scope || '', user.id);
   }
   req.session.uid = user.id;
   res.redirect('/app');
 }));
 
-app.get('/auth/demo', (req, res) => {
+app.get('/auth/demo', wrap(async (req, res) => {
   if (!DEMO) return res.status(404).send('Not found');
-  const user = get(`SELECT * FROM users WHERE google_id = 'demo'`) ||
-    createUser({ googleId: 'demo', email: 'demo@example.com', name: 'Demo User' });
+  const user = await get(`SELECT * FROM users WHERE google_id = 'demo'`) ||
+    await createUser({ googleId: 'demo', email: 'demo@example.com', name: 'Demo User' });
   req.session.uid = user.id;
   res.redirect('/app');
-});
+}));
 
-app.post('/auth/logout', (req, res) => {
+app.post('/auth/logout', wrap(async (req, res) => {
   req.session = null;
   res.json({ ok: true });
-});
+}));
 
 // ---------- owner API ----------
 
 app.get('/api/config', (req, res) => res.json({ appName: APP_NAME, demo: DEMO, baseUrl: BASE_URL }));
 
-app.get('/api/me', requireAuth, (req, res) => {
+app.get('/api/me', requireAuth, wrap(async (req, res) => {
   const u = req.user;
   res.json({
     user: {
@@ -342,9 +347,9 @@ app.get('/api/me', requireAuth, (req, res) => {
     },
     demo: DEMO, appName: APP_NAME, baseUrl: BASE_URL,
   });
-});
+}));
 
-app.put('/api/me', requireAuth, (req, res) => {
+app.put('/api/me', requireAuth, wrap(async (req, res) => {
   const u = req.user, b = req.body;
   const name = b.name !== undefined ? String(b.name).trim().slice(0, 100) : u.name;
   if (!name) fail(400, 'Name is required');
@@ -352,7 +357,7 @@ app.put('/api/me', requireAuth, (req, res) => {
   if (b.username !== undefined && b.username !== u.username) {
     username = String(b.username).toLowerCase().trim();
     if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(username)) fail(400, 'URL must be 3–40 characters: letters, numbers and dashes');
-    if (RESERVED.has(username) || get('SELECT 1 FROM users WHERE username = ? AND id != ?', username, u.id)) fail(409, 'That URL is already taken');
+    if (RESERVED.has(username) || await get('SELECT 1 FROM users WHERE username = ? AND id != ?', username, u.id)) fail(409, 'That URL is already taken');
   }
   const timezone = b.timezone !== undefined ? b.timezone : u.timezone;
   if (!isValidTimeZone(timezone)) fail(400, 'Invalid time zone');
@@ -363,58 +368,58 @@ app.put('/api/me', requireAuth, (req, res) => {
     calendars = JSON.stringify(b.conflictCalendars.map(String));
   }
   const onboarded = b.onboarded ? 1 : u.onboarded;
-  run('UPDATE users SET name = ?, username = ?, timezone = ?, welcome = ?, conflict_calendars = ?, onboarded = ? WHERE id = ?',
+  await run('UPDATE users SET name = ?, username = ?, timezone = ?, welcome = ?, conflict_calendars = ?, onboarded = ? WHERE id = ?',
     name, username, timezone, welcome, calendars, onboarded, u.id);
   res.json({ ok: true, username });
-});
+}));
 
 app.get('/api/calendars', requireAuth, wrap(async (req, res) => {
   if (!req.user.refresh_token) return res.json({ calendars: [] });
   res.json({ calendars: await google.listCalendars(req.user) });
 }));
 
-app.get('/api/event-types', requireAuth, (req, res) => {
-  res.json({ eventTypes: all('SELECT * FROM event_types WHERE user_id = ? ORDER BY created_at, id', req.user.id).map(serializeEventType) });
-});
+app.get('/api/event-types', requireAuth, wrap(async (req, res) => {
+  res.json({ eventTypes: (await all('SELECT * FROM event_types WHERE user_id = ? ORDER BY created_at, id', req.user.id)).map(serializeEventType) });
+}));
 
-app.post('/api/event-types', requireAuth, (req, res) => {
+app.post('/api/event-types', requireAuth, wrap(async (req, res) => {
   const v = validateEventType(req.body, {
     name: '', duration: 30, description: '', location_type: 'meet', location_value: '', color: '#8247f5', active: 1,
     buffer_before: 0, buffer_after: 0, min_notice: 240, max_days: 60, slot_interval: null,
   });
   if (!v.name) fail(400, 'Event name is required');
-  const slug = uniqueSlug(req.user.id, req.body.slug || v.name);
-  const { lastInsertRowid } = run(
+  const slug = await uniqueSlug(req.user.id, req.body.slug || v.name);
+  const { lastInsertRowid } = await run(
     `INSERT INTO event_types (user_id, name, slug, duration, description, location_type, location_value, color, active,
        buffer_before, buffer_after, min_notice, max_days, slot_interval, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     req.user.id, v.name, slug, v.duration, v.description, v.location_type, v.location_value, v.color, v.active,
     v.buffer_before, v.buffer_after, v.min_notice, v.max_days, v.slot_interval, Date.now());
-  res.status(201).json({ eventType: serializeEventType(get('SELECT * FROM event_types WHERE id = ?', lastInsertRowid)) });
-});
+  res.status(201).json({ eventType: serializeEventType(await get('SELECT * FROM event_types WHERE id = ?', lastInsertRowid)) });
+}));
 
-app.put('/api/event-types/:id', requireAuth, (req, res) => {
-  const existing = get('SELECT * FROM event_types WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
+app.put('/api/event-types/:id', requireAuth, wrap(async (req, res) => {
+  const existing = await get('SELECT * FROM event_types WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
   if (!existing) fail(404, 'Event type not found');
   const v = validateEventType(req.body, existing);
   if (req.body.slug !== undefined && req.body.slug !== existing.slug) {
     const slug = slugify(req.body.slug);
     if (!slug) fail(400, 'Invalid URL');
-    if (get('SELECT 1 FROM event_types WHERE user_id = ? AND slug = ? AND id != ?', req.user.id, slug, existing.id)) fail(409, 'You already have an event with that URL');
+    if (await get('SELECT 1 FROM event_types WHERE user_id = ? AND slug = ? AND id != ?', req.user.id, slug, existing.id)) fail(409, 'You already have an event with that URL');
     v.slug = slug;
   }
-  run(`UPDATE event_types SET name = ?, slug = ?, duration = ?, description = ?, location_type = ?, location_value = ?, color = ?,
+  await run(`UPDATE event_types SET name = ?, slug = ?, duration = ?, description = ?, location_type = ?, location_value = ?, color = ?,
          active = ?, buffer_before = ?, buffer_after = ?, min_notice = ?, max_days = ?, slot_interval = ? WHERE id = ?`,
     v.name, v.slug, v.duration, v.description, v.location_type, v.location_value, v.color, v.active,
     v.buffer_before, v.buffer_after, v.min_notice, v.max_days, v.slot_interval, existing.id);
-  res.json({ eventType: serializeEventType(get('SELECT * FROM event_types WHERE id = ?', existing.id)) });
-});
+  res.json({ eventType: serializeEventType(await get('SELECT * FROM event_types WHERE id = ?', existing.id)) });
+}));
 
-app.delete('/api/event-types/:id', requireAuth, (req, res) => {
-  const { changes } = run('DELETE FROM event_types WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
+app.delete('/api/event-types/:id', requireAuth, wrap(async (req, res) => {
+  const { changes } = await run('DELETE FROM event_types WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
   if (!changes) fail(404, 'Event type not found');
   res.json({ ok: true });
-});
+}));
 
 const toHHMM = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const fromHHMM = (s) => {
@@ -423,13 +428,13 @@ const fromHHMM = (s) => {
   return Number(m[1]) * 60 + Number(m[2]);
 };
 
-app.get('/api/availability', requireAuth, (req, res) => {
-  const rules = all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ? ORDER BY weekday, start_min', req.user.id)
+app.get('/api/availability', requireAuth, wrap(async (req, res) => {
+  const rules = (await all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ? ORDER BY weekday, start_min', req.user.id))
     .map((r) => ({ weekday: r.weekday, start: toHHMM(r.start_min), end: toHHMM(r.end_min) }));
   res.json({ timezone: req.user.timezone, rules });
-});
+}));
 
-app.put('/api/availability', requireAuth, (req, res) => {
+app.put('/api/availability', requireAuth, wrap(async (req, res) => {
   const { rules, timezone } = req.body;
   if (!Array.isArray(rules) || rules.length > 100) fail(400, 'Invalid availability');
   if (timezone !== undefined && !isValidTimeZone(timezone)) fail(400, 'Invalid time zone');
@@ -444,15 +449,15 @@ app.put('/api/availability', requireAuth, (req, res) => {
     const day = parsed.filter((r) => r.weekday === d).sort((a, b) => a.start - b.start);
     for (let i = 1; i < day.length; i++) if (day[i].start < day[i - 1].end) fail(400, 'Times overlap with another set of times');
   }
-  transaction(() => {
-    run('DELETE FROM availability WHERE user_id = ?', req.user.id);
-    for (const r of parsed) run('INSERT INTO availability (user_id, weekday, start_min, end_min) VALUES (?, ?, ?, ?)', req.user.id, r.weekday, r.start, r.end);
-    if (timezone) run('UPDATE users SET timezone = ? WHERE id = ?', timezone, req.user.id);
-  });
+  await batch([
+    ['DELETE FROM availability WHERE user_id = ?', req.user.id],
+    ...parsed.map((r) => ['INSERT INTO availability (user_id, weekday, start_min, end_min) VALUES (?, ?, ?, ?)', req.user.id, r.weekday, r.start, r.end]),
+    ...(timezone ? [['UPDATE users SET timezone = ? WHERE id = ?', timezone, req.user.id]] : []),
+  ]);
   res.json({ ok: true });
-});
+}));
 
-app.get('/api/bookings', requireAuth, (req, res) => {
+app.get('/api/bookings', requireAuth, wrap(async (req, res) => {
   const now = Date.now();
   const scope = req.query.scope || 'upcoming';
   const queries = {
@@ -462,12 +467,12 @@ app.get('/api/bookings', requireAuth, (req, res) => {
   };
   const q = queries[scope];
   if (!q) fail(400, 'Unknown scope');
-  const rows = all(`SELECT * FROM bookings WHERE user_id = ? AND ${q[0]} LIMIT 500`, req.user.id, q[1]);
+  const rows = await all(`SELECT * FROM bookings WHERE user_id = ? AND ${q[0]} LIMIT 500`, req.user.id, q[1]);
   res.json({ bookings: rows.map((b) => serializeBooking(b, { host: true })) });
-});
+}));
 
 app.post('/api/bookings/:uid/cancel', requireAuth, wrap(async (req, res) => {
-  const booking = get('SELECT * FROM bookings WHERE uid = ? AND user_id = ?', req.params.uid, req.user.id);
+  const booking = await get('SELECT * FROM bookings WHERE uid = ? AND user_id = ?', req.params.uid, req.user.id);
   if (!booking) fail(404, 'Booking not found');
   const updated = await cancelBooking(booking, req.body.reason, 'host');
   res.json({ booking: serializeBooking(updated, { host: true }) });
@@ -475,31 +480,31 @@ app.post('/api/bookings/:uid/cancel', requireAuth, wrap(async (req, res) => {
 
 // ---------- public API ----------
 
-app.get('/api/u/:username', (req, res) => {
-  const { user } = loadPublic(req);
-  const eventTypes = all('SELECT * FROM event_types WHERE user_id = ? AND active = 1 ORDER BY created_at, id', user.id).map(serializeEventType);
+app.get('/api/u/:username', wrap(async (req, res) => {
+  const { user } = await loadPublic(req);
+  const eventTypes = (await all('SELECT * FROM event_types WHERE user_id = ? AND active = 1 ORDER BY created_at, id', user.id)).map(serializeEventType);
   res.json({ user: publicUser(user), eventTypes });
-});
+}));
 
-app.get('/api/u/:username/:slug', (req, res) => {
-  const { user, et } = loadPublic(req);
-  if (!et.active && currentUser(req)?.id !== user.id) fail(404, 'This event is not available');
+app.get('/api/u/:username/:slug', wrap(async (req, res) => {
+  const { user, et } = await loadPublic(req);
+  if (!et.active && (await currentUser(req))?.id !== user.id) fail(404, 'This event is not available');
   res.json({ user: publicUser(user), eventType: serializeEventType(et) });
-});
+}));
 
 app.get('/api/u/:username/:slug/slots', wrap(async (req, res) => {
-  const { user, et } = loadPublic(req);
+  const { user, et } = await loadPublic(req);
   if (!et.active) fail(404, 'This event is not available');
   const from = Date.parse(req.query.from), to = Date.parse(req.query.to);
   if (Number.isNaN(from) || Number.isNaN(to) || to <= from || to - from > 62 * 86400000) fail(400, 'Invalid range');
   let exclude = null;
-  if (req.query.reschedule) exclude = get(`SELECT * FROM bookings WHERE uid = ? AND user_id = ? AND status = 'confirmed'`, req.query.reschedule, user.id);
+  if (req.query.reschedule) exclude = await get(`SELECT * FROM bookings WHERE uid = ? AND user_id = ? AND status = 'confirmed'`, req.query.reschedule, user.id);
   const slots = await availableSlots(user, et, from, to, exclude);
   res.json({ timezone: user.timezone, slots: slots.map((ms) => new Date(ms).toISOString()) });
 }));
 
 app.post('/api/u/:username/:slug/book', wrap(async (req, res) => {
-  const { user, et } = loadPublic(req);
+  const { user, et } = await loadPublic(req);
   if (!et.active) fail(404, 'This event is not available');
   const b = req.body;
   const { name, email, guests, phone, startMs, notes } = parseInvitee(b, et.location_type);
@@ -509,7 +514,7 @@ app.post('/api/u/:username/:slug/book', wrap(async (req, res) => {
   if (!slots.includes(startMs)) fail(409, 'Sorry, that time is no longer available. Please pick another time.');
 
   const uid = crypto.randomBytes(16).toString('hex');
-  const { lastInsertRowid } = run(
+  const { lastInsertRowid } = await run(
     `INSERT INTO bookings (uid, user_id, event_type_id, event_name, event_slug, duration, color, location_type, location_value,
        invitee_name, invitee_email, invitee_phone, invitee_tz, guests, notes, start_ms, end_ms, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -517,7 +522,7 @@ app.post('/api/u/:username/:slug/book', wrap(async (req, res) => {
     et.location_type === 'phone' ? phone : et.location_value,
     name, email, phone, tz, JSON.stringify(guests), notes,
     startMs, startMs + et.duration * 60000, Date.now());
-  const booking = await syncCreate(user, get('SELECT * FROM bookings WHERE id = ?', lastInsertRowid));
+  const booking = await syncCreate(user, await get('SELECT * FROM bookings WHERE id = ?', lastInsertRowid));
   res.status(201).json({ booking: serializeBooking(booking), invitesSent: Boolean(booking.google_event_id) });
 }));
 
@@ -536,54 +541,54 @@ function parseInvitee(b, locationType) {
   return { name, email, guests, phone, startMs, notes: String(b.notes || '').slice(0, 5000) };
 }
 
-function loadBooking(uid) {
-  const booking = get('SELECT * FROM bookings WHERE uid = ?', String(uid));
+async function loadBooking(uid) {
+  const booking = await get('SELECT * FROM bookings WHERE uid = ?', String(uid));
   if (!booking) fail(404, 'Booking not found');
-  return { booking, host: get('SELECT * FROM users WHERE id = ?', booking.user_id) };
+  return { booking, host: await get('SELECT * FROM users WHERE id = ?', booking.user_id) };
 }
 
-app.get('/api/b/:uid', (req, res) => {
-  const { booking, host } = loadBooking(req.params.uid);
+app.get('/api/b/:uid', wrap(async (req, res) => {
+  const { booking, host } = await loadBooking(req.params.uid);
   const upcoming = booking.status === 'confirmed' && booking.start_ms > Date.now();
   let canReschedule = false, rescheduleUrl = null;
   if (booking.proposal_id) {
-    const p = get('SELECT * FROM proposals WHERE id = ?', booking.proposal_id);
+    const p = await get('SELECT * FROM proposals WHERE id = ?', booking.proposal_id);
     canReschedule = upcoming && p?.status === 'open';
     if (canReschedule) rescheduleUrl = `/p/${p.token}?reschedule=${booking.uid}`;
   } else {
-    const et = booking.event_type_id ? get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id) : null;
+    const et = booking.event_type_id ? await get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id) : null;
     canReschedule = upcoming && Boolean(et?.active);
     if (canReschedule) rescheduleUrl = `/${host.username}/${et.slug}?reschedule=${booking.uid}`;
   }
   res.json({ booking: serializeBooking(booking), host: publicUser(host), canReschedule, rescheduleUrl });
-});
+}));
 
 app.post('/api/b/:uid/cancel', wrap(async (req, res) => {
-  const { booking } = loadBooking(req.params.uid);
+  const { booking } = await loadBooking(req.params.uid);
   if (booking.start_ms < Date.now()) fail(400, 'This event has already happened');
   const updated = await cancelBooking(booking, req.body.reason, 'invitee');
   res.json({ booking: serializeBooking(updated) });
 }));
 
 app.post('/api/b/:uid/reschedule', wrap(async (req, res) => {
-  const { booking, host } = loadBooking(req.params.uid);
+  const { booking, host } = await loadBooking(req.params.uid);
   if (booking.status !== 'confirmed') fail(400, 'This event was canceled');
   const startMs = Date.parse(req.body.start);
   if (Number.isNaN(startMs)) fail(400, 'Invalid time');
   let ok;
   if (booking.proposal_id) {
-    const p = get('SELECT * FROM proposals WHERE id = ?', booking.proposal_id);
+    const p = await get('SELECT * FROM proposals WHERE id = ?', booking.proposal_id);
     if (!p || p.status !== 'open') fail(400, 'This event can no longer be rescheduled');
     ok = (await openProposalTimes(host, p, booking)).includes(startMs);
   } else {
-    const et = booking.event_type_id ? get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id) : null;
+    const et = booking.event_type_id ? await get('SELECT * FROM event_types WHERE id = ?', booking.event_type_id) : null;
     if (!et?.active) fail(400, 'This event can no longer be rescheduled');
     ok = (await availableSlots(host, et, startMs, startMs + 1, booking)).includes(startMs);
   }
   if (!ok) fail(409, 'Sorry, that time is no longer available. Please pick another time.');
   const endMs = startMs + booking.duration * 60000;
-  run('UPDATE bookings SET start_ms = ?, end_ms = ? WHERE id = ?', startMs, endMs, booking.id);
-  let updated = get('SELECT * FROM bookings WHERE id = ?', booking.id);
+  await run('UPDATE bookings SET start_ms = ?, end_ms = ? WHERE id = ?', startMs, endMs, booking.id);
+  let updated = await get('SELECT * FROM bookings WHERE id = ?', booking.id);
   if (host.refresh_token && booking.google_event_id) {
     try {
       await google.patchEvent(host, booking.google_event_id, {
@@ -592,7 +597,7 @@ app.post('/api/b/:uid/reschedule', wrap(async (req, res) => {
       });
     } catch (err) {
       console.error('Google event update failed:', err.message);
-      run('UPDATE bookings SET sync_error = ? WHERE id = ?', err.message, booking.id);
+      await run('UPDATE bookings SET sync_error = ? WHERE id = ?', err.message, booking.id);
     }
   } else {
     updated = await syncCreate(host, updated);
@@ -600,8 +605,8 @@ app.post('/api/b/:uid/reschedule', wrap(async (req, res) => {
   res.json({ booking: serializeBooking(updated) });
 }));
 
-app.get('/api/b/:uid/ics', (req, res) => {
-  const { booking: b, host } = loadBooking(req.params.uid);
+app.get('/api/b/:uid/ics', wrap(async (req, res) => {
+  const { booking: b, host } = await loadBooking(req.params.uid);
   const ics = buildIcs({
     uid: b.uid, start: b.start_ms, end: b.end_ms,
     summary: `${b.event_name} with ${host.name}`,
@@ -613,7 +618,7 @@ app.get('/api/b/:uid/ics', (req, res) => {
   res.set('Content-Type', 'text/calendar; charset=utf-8');
   res.set('Content-Disposition', `attachment; filename="${b.event_slug}.ics"`);
   res.send(ics);
-});
+}));
 
 // ---------- invite links (hand-picked times for one customer) ----------
 
@@ -636,8 +641,8 @@ const parseDuration = (v) => {
   return n;
 };
 
-function workingRules(userId) {
-  const rules = all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ?', userId);
+async function workingRules(userId) {
+  const rules = await all('SELECT weekday, start_min, end_min FROM availability WHERE user_id = ?', userId);
   return rules.length ? rules : [1, 2, 3, 4, 5].map((weekday) => ({ weekday, start_min: 540, end_min: 1020 }));
 }
 
@@ -653,7 +658,7 @@ async function describeTimes(user, starts, duration) {
   if (!starts.length) return [];
   const dur = duration * 60000;
   const busy = await getBusy(user, Math.min(...starts), Math.max(...starts) + dur);
-  const rules = workingRules(user.id);
+  const rules = await workingRules(user.id);
   const now = Date.now();
   return starts.map((start) => ({
     local: toLocal(start, user.timezone),
@@ -689,7 +694,7 @@ app.post('/api/suggest', requireAuth, wrap(async (req, res) => {
   const now = Date.now();
   const fromMs = now + 60 * 60000, toMs = now + days * 86400000;
   const busy = await getBusy(req.user, fromMs - 86400000, toMs + 86400000);
-  let rules = workingRules(req.user.id);
+  let rules = await workingRules(req.user.id);
   // Evening requests may fall outside working hours; widen the window so there's something to suggest.
   if (period === 'evening') rules = [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, start_min: 17 * 60, end_min: 21 * 60 }));
   const candidates = computeSlots({ rules, tz: req.user.timezone, duration, interval: 30, fromMs, toMs, busy })
@@ -698,7 +703,7 @@ app.post('/api/suggest', requireAuth, wrap(async (req, res) => {
   res.json({ times: await describeTimes(req.user, picks, duration) });
 }));
 
-function serializeProposal(p, { host = false } = {}) {
+async function serializeProposal(p, { host = false } = {}) {
   const times = JSON.parse(p.times);
   const out = {
     token: p.token, url: `${BASE_URL}/p/${p.token}`, title: p.title, duration: p.duration,
@@ -706,7 +711,7 @@ function serializeProposal(p, { host = false } = {}) {
     customerName: p.customer_name, customerEmail: p.customer_email, singleUse: Boolean(p.single_use),
   };
   if (host) {
-    const bookings = all(`SELECT * FROM bookings WHERE proposal_id = ? AND status = 'confirmed' ORDER BY start_ms`, p.id);
+    const bookings = await all(`SELECT * FROM bookings WHERE proposal_id = ? AND status = 'confirmed' ORDER BY start_ms`, p.id);
     const now = Date.now();
     let status = p.status;
     if (status === 'open' && p.single_use && bookings.length) status = 'booked';
@@ -723,7 +728,7 @@ function serializeProposal(p, { host = false } = {}) {
 /** Proposal times that can still be booked right now. */
 async function openProposalTimes(user, p, exclude = null) {
   if (p.status !== 'open') return [];
-  if (p.single_use && !exclude && get(`SELECT 1 FROM bookings WHERE proposal_id = ? AND status = 'confirmed'`, p.id)) return [];
+  if (p.single_use && !exclude && await get(`SELECT 1 FROM bookings WHERE proposal_id = ? AND status = 'confirmed'`, p.id)) return [];
   const now = Date.now();
   const times = JSON.parse(p.times).filter((t) => t > now);
   if (!times.length) return [];
@@ -745,27 +750,27 @@ app.post('/api/proposals', requireAuth, wrap(async (req, res) => {
   const times = [...new Set(b.times.map((t) => parseLocal(t, u.timezone)))].sort((x, y) => x - y);
   if (times.some((t) => t <= now)) fail(400, 'One of the times is in the past');
   const token = crypto.randomBytes(12).toString('base64url');
-  const { lastInsertRowid } = run(
+  const { lastInsertRowid } = await run(
     `INSERT INTO proposals (token, user_id, title, duration, location_type, location_value, note, customer_name, customer_email, times, single_use, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     token, u.id, title, duration, b.locationType || 'meet', String(b.locationValue || '').slice(0, 500), String(b.note || '').slice(0, 2000),
     String(b.customerName || '').trim().slice(0, 200), customerEmail, JSON.stringify(times), b.singleUse === false ? 0 : 1, now);
-  res.status(201).json({ proposal: serializeProposal(get('SELECT * FROM proposals WHERE id = ?', lastInsertRowid), { host: true }) });
+  res.status(201).json({ proposal: await serializeProposal(await get('SELECT * FROM proposals WHERE id = ?', lastInsertRowid), { host: true }) });
 }));
 
-app.get('/api/proposals', requireAuth, (req, res) => {
-  const rows = all('SELECT * FROM proposals WHERE user_id = ? ORDER BY created_at DESC LIMIT 200', req.user.id);
-  res.json({ proposals: rows.map((p) => serializeProposal(p, { host: true })), canSendEmail: google.canSendEmail(req.user) });
-});
+app.get('/api/proposals', requireAuth, wrap(async (req, res) => {
+  const rows = await all('SELECT * FROM proposals WHERE user_id = ? ORDER BY created_at DESC LIMIT 200', req.user.id);
+  res.json({ proposals: await Promise.all(rows.map((p) => serializeProposal(p, { host: true }))), canSendEmail: google.canSendEmail(req.user) });
+}));
 
-app.delete('/api/proposals/:id', requireAuth, (req, res) => {
-  const { changes } = run(`UPDATE proposals SET status = 'cancelled' WHERE id = ? AND user_id = ?`, req.params.id, req.user.id);
+app.delete('/api/proposals/:id', requireAuth, wrap(async (req, res) => {
+  const { changes } = await run(`UPDATE proposals SET status = 'cancelled' WHERE id = ? AND user_id = ?`, req.params.id, req.user.id);
   if (!changes) fail(404, 'Invite link not found');
   res.json({ ok: true });
-});
+}));
 
 app.post('/api/proposals/:id/send', requireAuth, wrap(async (req, res) => {
-  const p = get('SELECT * FROM proposals WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
+  const p = await get('SELECT * FROM proposals WHERE id = ? AND user_id = ?', req.params.id, req.user.id);
   if (!p) fail(404, 'Invite link not found');
   if (!google.canSendEmail(req.user)) fail(400, 'Reconnect Google to send emails from your Gmail.');
   const to = String(req.body.to || p.customer_email).trim().toLowerCase();
@@ -774,41 +779,41 @@ app.post('/api/proposals/:id/send', requireAuth, wrap(async (req, res) => {
   if (!times.length) fail(400, 'None of the times in this link are still available');
   const email = inviteEmail({ host: req.user, proposal: p, times, url: `${BASE_URL}/p/${p.token}`, appName: APP_NAME });
   await google.sendEmail(req.user, { to, ...email });
-  run('UPDATE proposals SET sent_at = ?, customer_email = ? WHERE id = ?', Date.now(), to, p.id);
+  await run('UPDATE proposals SET sent_at = ?, customer_email = ? WHERE id = ?', Date.now(), to, p.id);
   res.json({ ok: true });
 }));
 
-function loadProposal(token) {
-  const p = get('SELECT * FROM proposals WHERE token = ?', String(token));
+async function loadProposal(token) {
+  const p = await get('SELECT * FROM proposals WHERE token = ?', String(token));
   if (!p) fail(404, 'This link is not valid');
-  return { p, host: get('SELECT * FROM users WHERE id = ?', p.user_id) };
+  return { p, host: await get('SELECT * FROM users WHERE id = ?', p.user_id) };
 }
 
 app.get('/api/p/:token', wrap(async (req, res) => {
-  const { p, host } = loadProposal(req.params.token);
+  const { p, host } = await loadProposal(req.params.token);
   let exclude = null;
-  if (req.query.reschedule) exclude = get(`SELECT * FROM bookings WHERE uid = ? AND proposal_id = ? AND status = 'confirmed'`, String(req.query.reschedule), p.id);
+  if (req.query.reschedule) exclude = await get(`SELECT * FROM bookings WHERE uid = ? AND proposal_id = ? AND status = 'confirmed'`, String(req.query.reschedule), p.id);
   const times = await openProposalTimes(host, p, exclude);
   let status = p.status === 'cancelled' ? 'cancelled' : 'open';
   if (status === 'open' && !times.length) {
-    status = p.single_use && !exclude && get(`SELECT 1 FROM bookings WHERE proposal_id = ? AND status = 'confirmed'`, p.id) ? 'booked' : 'unavailable';
+    status = p.single_use && !exclude && await get(`SELECT 1 FROM bookings WHERE proposal_id = ? AND status = 'confirmed'`, p.id) ? 'booked' : 'unavailable';
   }
-  res.json({ host: publicUser(host), proposal: serializeProposal(p), status, times: times.map((t) => new Date(t).toISOString()) });
+  res.json({ host: publicUser(host), proposal: await serializeProposal(p), status, times: times.map((t) => new Date(t).toISOString()) });
 }));
 
 app.post('/api/p/:token/book', wrap(async (req, res) => {
-  const { p, host } = loadProposal(req.params.token);
+  const { p, host } = await loadProposal(req.params.token);
   const v = parseInvitee(req.body, p.location_type);
   const tz = isValidTimeZone(req.body.timezone) ? req.body.timezone : host.timezone;
   if (!(await openProposalTimes(host, p)).includes(v.startMs)) fail(409, 'Sorry, that time is no longer available. Please pick another time.');
   const uid = crypto.randomBytes(16).toString('hex');
-  const { lastInsertRowid } = run(
+  const { lastInsertRowid } = await run(
     `INSERT INTO bookings (uid, user_id, proposal_id, event_name, event_slug, duration, color, location_type, location_value,
        invitee_name, invitee_email, invitee_phone, invitee_tz, guests, notes, start_ms, end_ms, created_at)
      VALUES (?, ?, ?, ?, '', ?, '#006bff', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     uid, host.id, p.id, p.title, p.duration, p.location_type, p.location_type === 'phone' ? v.phone : p.location_value,
     v.name, v.email, v.phone, tz, JSON.stringify(v.guests), v.notes, v.startMs, v.startMs + p.duration * 60000, Date.now());
-  const booking = await syncCreate(host, get('SELECT * FROM bookings WHERE id = ?', lastInsertRowid));
+  const booking = await syncCreate(host, await get('SELECT * FROM bookings WHERE id = ?', lastInsertRowid));
   res.status(201).json({ booking: serializeBooking(booking), invitesSent: Boolean(booking.google_event_id) });
 }));
 
@@ -816,14 +821,14 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // ---------- pages ----------
 
-const page = (file) => (req, res) => res.sendFile(path.join(__dirname, 'public', file));
-app.get('/', (req, res, next) => (currentUser(req) && !req.query.home ? res.redirect('/app') : next()), page('index.html'));
-app.get(['/app', '/app/*'], page('app.html'));
-app.get('/booking/:uid', page('manage.html'));
-app.get('/p/:token', page('invite.html'));
-app.get('/:username', (req, res, next) => (RESERVED.has(req.params.username) ? next() : page('profile.html')(req, res)));
-app.get('/:username/:slug', (req, res, next) => (RESERVED.has(req.params.username) ? next() : page('book.html')(req, res)));
-app.use((req, res) => res.status(404).sendFile(path.join(__dirname, 'public', '404.html')));
+const page = (name, status = 200) => (req, res) => res.status(status).type('html').set('Cache-Control', 'no-cache').send(renderPage(name));
+app.get('/', wrap(async (req, res, next) => ((await currentUser(req)) && !req.query.home ? res.redirect('/app') : next())), page('index'));
+app.get(['/app', '/app/*'], page('app'));
+app.get('/booking/:uid', page('manage'));
+app.get('/p/:token', page('invite'));
+app.get('/:username', (req, res, next) => (RESERVED.has(req.params.username) ? next() : page('profile')(req, res)));
+app.get('/:username/:slug', (req, res, next) => (RESERVED.has(req.params.username) ? next() : page('book')(req, res)));
+app.use(page('404', 404));
 
 app.use((err, req, res, next) => {
   const status = err.status || (err.type === 'entity.parse.failed' ? 400 : 500);
@@ -834,7 +839,12 @@ app.use((err, req, res, next) => {
   else res.status(status).send(message);
 });
 
-app.listen(PORT, () => {
-  console.log(`${APP_NAME} running at ${BASE_URL}`);
-  if (DEMO) console.log('Demo mode: set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable Google sign-in and Calendar sync.');
-});
+// On Vercel the platform imports the app; everywhere else we start a server.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`${APP_NAME} running at ${BASE_URL}`);
+    if (DEMO) console.log('Demo mode: set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable Google sign-in and Calendar sync.');
+  });
+}
+
+export default app;
