@@ -24,7 +24,7 @@ const DEMO = !google.enabled();
 const REDIRECT_URI = `${BASE_URL}/auth/google/callback`;
 
 const RESERVED = new Set(['app', 'api', 'auth', 'booking', 'p', 'css', 'js', 'img', 'assets', 'login', 'logout',
-  'signup', 'admin', 'settings', 'help', 'favicon.ico', 'robots.txt', 'about', 'pricing']);
+  'signup', 'admin', 'settings', 'help', 'privacy', 'terms', 'favicon.ico', 'robots.txt', 'about', 'pricing']);
 const LOCATION_TYPES = ['meet', 'phone', 'in_person', 'custom'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -840,6 +840,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 const page = (name, status = 200) => (req, res) => res.status(status).type('html').set('Cache-Control', 'no-cache').send(renderPage(name));
 app.get('/', wrap(async (req, res, next) => ((await currentUser(req)) && !req.query.home ? res.redirect('/app') : next())), page('index'));
+app.get('/privacy', page('privacy'));
 app.get(['/app', '/app/*'], page('app'));
 app.get('/booking/:uid', page('manage'));
 app.get('/p/:token', page('invite'));

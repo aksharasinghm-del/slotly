@@ -495,3 +495,10 @@ details.adv summary { cursor: pointer; font-weight: 600; color: var(--blue); mar
   .sel-day { grid-template-columns: 1fr; gap: 4px; }
   .slot-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* legal pages */
+.legal { max-width: 760px; padding: 40px 44px; line-height: 1.65; }
+.legal h1 { font-size: 28px; margin-bottom: 4px; }
+.legal h2 { font-size: 18px; margin: 26px 0 6px; }
+.legal p, .legal li { color: var(--text); }
+@media (max-width: 860px) { .legal { padding: 28px 16px; } }
