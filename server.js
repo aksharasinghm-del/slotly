@@ -39,6 +39,14 @@ const SESSION_SECRET = process.env.SESSION_SECRET
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+// Send visitors on the *.vercel.app address to the custom domain, so sign-in and links always use one address.
+const CANONICAL_HOST = new URL(BASE_URL).host;
+app.use((req, res, next) => {
+  if (process.env.VERCEL && req.hostname.endsWith('.vercel.app') && !CANONICAL_HOST.endsWith('.vercel.app')) {
+    return res.redirect(301, `${BASE_URL}${req.originalUrl}`);
+  }
+  next();
+});
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieSession({
   name: 'slotly',
